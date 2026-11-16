@@ -1,0 +1,3 @@
+#!/bin/sh
+# 输出设备注册表的 JSON。
+printf '{}' | /usr/libexec/rpcd/portal call devices

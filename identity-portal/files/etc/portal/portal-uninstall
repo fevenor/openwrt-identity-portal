@@ -1,0 +1,40 @@
+#!/bin/sh
+# 卸载只删除门户自己添加的设施。注册表备份权限为 0600。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+exec 9>"$PORTAL_LOCK"
+portal_flock 9 || exit 1
+portal_load || exit 1
+[ -z "$(uci -q changes wireless)$(uci -q changes firewall)" ] || { echo '请先处理 wireless 与 firewall 的外部暂存修改' >&2; exit 1; }
+umask 077
+cp "$PORTAL_CONFIG_DIR/portal" "/root/identity-portal-backup-$(date +%Y%m%d%H%M%S).uci" || exit 1
+changed=0
+for sec in $(uci -q show wireless | sed -n 's/^wireless\.\([^.]*\)=wifi-iface$/\1/p'); do
+	owned="$(uci -q get wireless.$sec.portal_owned_macs)"
+	[ -n "$owned" ] || continue
+	for mac in $owned; do uci -q del_list "wireless.$sec.maclist=$mac"; done
+	remain="$(uci -q get wireless.$sec.maclist)"
+	mode="$(uci -q get wireless.$sec.macfilter)"
+	previous="$(uci -q get wireless.$sec.portal_previous_filter)"
+	if [ -z "$remain" ] && [ "$mode" = deny ]; then
+		case "$previous" in unset) uci -q delete wireless.$sec.macfilter;; disable|deny) uci set "wireless.$sec.macfilter=$previous";; esac
+	fi
+	uci -q delete wireless.$sec.portal_owned_macs
+	uci -q delete wireless.$sec.portal_previous_filter
+	changed=1
+done
+[ "$changed" != 1 ] || uci commit wireless || exit 1
+portal_flock_unlock 9
+/etc/init.d/portal stop || exit 1
+[ ! -f "$PORTAL_HISTORY_FILE" ] || cp "$PORTAL_HISTORY_FILE" "/root/identity-portal-history-$(date +%Y%m%d%H%M%S).tsv" || exit 1
+[ "$changed" != 1 ] || ubus call network reload >/dev/null || exit 1
+uci -q delete firewall.portal_include
+uci -q commit firewall
+sed -i '\|/etc/portal/gen_rules.sh|d;\|/etc/portal/gen-unauth-src.sh|d;\|/etc/portal/portal-assoc-log.sh|d' /etc/crontabs/root 2>/dev/null
+sed -i '\|^/etc/portal$|d;\|^/usr/share/portal/var$|d' /etc/sysupgrade.conf 2>/dev/null
+# 保留一个空效载荷，避免外部仍引用文件时 Mihomo 启动失败。
+mkdir -p "$PORTAL_RUN"
+tmp="$(mktemp "$PORTAL_RUN/provider.XXXXXX")" || exit 1
+printf 'payload:\n  - SRC-IP-CIDR,192.0.2.255/32\n' > "$tmp"
+mv -f "$tmp" "$PORTAL_UNAUTH_FILE"
+logger -t identity-portal '门户已卸载；外部 Mihomo 配置及管理员规则请按需自行清理'
+exit 0

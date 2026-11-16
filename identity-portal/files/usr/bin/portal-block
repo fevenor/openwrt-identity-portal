@@ -1,0 +1,9 @@
+#!/bin/sh
+
+ADMIN=/etc/portal/portal-admin
+
+[ $# -ge 1 ] || {
+	echo "用法：portal-block <MAC> [拉黑原因|选填] [L1|L2]" >&2
+	exit 1
+}
+exec "$ADMIN" block "$1" "${2:--}" "${3:-L1}"

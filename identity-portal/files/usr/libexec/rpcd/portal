@@ -1,0 +1,204 @@
+#!/bin/sh
+# 只读查询复用本次请求快照，写操作转统一管理入口。权限由 rpcd ACL 控制。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+jerr() { json_init; json_add_string error "$1"; json_add_string message "$2"; json_dump; }
+if [ "$1" = list ]; then
+	cat <<'JSON'
+{"status":{},"inventory":{},"unidentified":{},"devices":{},"identities":{},"audit":{"tail":0,"offset":0,"grep":""},"config":{},"page":{},"rename":{"id":"","name":""},"merge":{"src_id":"","dst_id":""},"split":{"mac":"","new_name":""},"delete":{"id":""},"block":{"mac":"","reason":"","level":""},"unblock":{"mac":""},"setpage":{"title":"","prompt":""},"whitelist":{"mac":"","trusted":0},"assign":{"mac":"","identity":""},"setdevice":{"mac":"","label":"","note":""},"setenabled":{"enabled":0},"setidentity":{"id":"","note":""},"forget":{"mac":""},"setegress":{"mac":"","egress":""},"setoffload":{"policy":""}}
+JSON
+	exit 0
+fi
+[ "$1" = call ] || exit 1
+export LC_ALL=C
+REQ="$(head -c 8193)"
+[ "${#REQ}" -le 8192 ] || { jerr E_PARAM '请求过长'; exit; }
+json_load "$REQ" || { jerr E_PARAM 'JSON 格式错误'; exit; }
+get_arg() { json_get_var "$1" "$1"; }
+has_arg() { local t; json_get_type t "$1"; [ "$t" = string ]; }
+case "$2" in
+	rename) get_arg id; get_arg name; exec /etc/portal/portal-admin rename "$id" "$name";;
+	merge) get_arg src_id; get_arg dst_id; exec /etc/portal/portal-admin merge "$src_id" "$dst_id";;
+	split) get_arg mac; get_arg new_name; exec /etc/portal/portal-admin split "$mac" "$new_name";;
+	delete) get_arg id; exec /etc/portal/portal-admin delete "$id";;
+	block) get_arg mac; get_arg reason; get_arg level; exec /etc/portal/portal-admin block "$mac" "$reason" "${level:-L1}";;
+	unblock|forget) get_arg mac; exec /etc/portal/portal-admin "$2" "$mac";;
+	setpage) get_arg title; get_arg prompt; exec /etc/portal/portal-admin setpage "$title" "$prompt";;
+	whitelist) get_arg mac; get_arg trusted; exec /etc/portal/portal-admin whitelist "$mac" "$trusted";;
+	assign) get_arg mac; has_arg identity || { jerr E_PARAM '缺少身份字段'; exit; }; get_arg identity; exec /etc/portal/portal-admin assign "$mac" "$identity";;
+	setdevice)
+		get_arg mac; get_arg label; get_arg note; hl=0; hn=0
+		has_arg label && hl=1; has_arg note && hn=1
+		exec /etc/portal/portal-admin setdevice "$mac" "$label" "$note" "$hl" "$hn";;
+	setidentity) get_arg id; has_arg note || { jerr E_PARAM '缺少备注字段'; exit; }; get_arg note; exec /etc/portal/portal-admin setidentity "$id" "$note";;
+	setenabled) get_arg enabled; exec /etc/portal/portal-admin setenabled "$enabled";;
+	setegress) get_arg mac; get_arg egress; exec /etc/portal/portal-admin setegress "$mac" "$egress";;
+	setoffload) get_arg policy; exec /etc/portal/portal-admin setoffload "$policy";;
+esac
+# 保存查询参数后重新初始化输出；类型和范围均有上限。
+get_arg tail; get_arg offset; get_arg grep
+portal_load || { jerr E_CONFIG '无法读取配置'; exit; }
+trap 'portal_snapshot_cleanup' EXIT HUP INT TERM
+json_init
+add_config_string() { local v; config_get v "$1" "$2"; json_add_string "$2" "$v"; }
+
+add_ipv6() {
+ local mac="$1" os="$2" owner addr stamp suffix other kind candidate candidatesuffix used tab
+ tab="$(printf '\t')"
+ json_add_array ipv6
+ if [ "$os" = online ]; then
+  while IFS="$tab" read -r owner addr suffix kind; do
+   [ "$owner" = "$mac" ] || continue
+   json_add_object ''; json_add_string address "$addr"; json_add_string suffix "$suffix"; json_add_string source neighbor
+   json_add_string kind "$kind"; json_close_object
+  done < "$PORTAL_SNAPSHOT/ipv6-map"
+ fi
+ json_close_array
+ json_add_array ipv6_history
+ while IFS="$tab" read -r owner addr suffix stamp; do
+  [ "$owner" = "$mac" ] || continue
+  json_add_object ''; json_add_string address "$addr"; json_add_string suffix "$suffix"; json_add_int seen_at "$stamp"; json_close_object
+ done < "$PORTAL_SNAPSHOT/ipv6-history-map"
+ json_close_array
+ json_add_array ipv6_candidates
+ used=
+ while IFS="$tab" read -r owner addr suffix stamp; do
+  [ "$owner" = "$mac" ] || continue
+  case "$addr" in fe[89ab]*) continue;; esac
+  case " $used " in *" $suffix "*) continue;; esac
+  used="$used $suffix"
+  # 同后缀另一个 MAC 只是冲突候选，不产生身份关联或访问许可。
+  while IFS="$tab" read -r other candidate candidatesuffix kind; do
+   [ "$candidatesuffix" = "$suffix" ] && [ "$other" != "$mac" ] && [ "$kind" != link-local ] || continue
+   json_add_object ''; json_add_string address "$candidate"; json_add_string mac "$other"; json_add_string suffix "$suffix"; json_add_boolean conflict 1; json_close_object
+  done < "$PORTAL_SNAPSHOT/ipv6-map"
+ done < "$PORTAL_SNAPSHOT/ipv6-history-map"
+ json_close_array
+}
+emit_devices() {
+ local macs mac sec state hn source online os ip key stamp trusted policy eg id name text field v laa
+ json_add_array "$1"
+ if [ "$2" = devices ]; then macs="$(portal_registry | cut -f1)"; else macs="$(portal_pool_macs)"; fi
+		for mac in $macs; do
+			sec="$(portal_find_device "$mac")"; state="$(portal_device_state "$mac")"
+			json_add_object ''
+			json_add_string mac "$mac"; json_add_string vendor "$(portal_oui_vendor "$mac")"
+			laa=0; portal_is_laa "$mac" && laa=1; json_add_boolean is_laa "$laa"
+			hn="$(portal_hostname_of_mac "$mac")"; source=dhcp
+			if [ -z "$hn" ]; then hn="$(portal_history_attr "$mac" 4)"; source=history; fi
+			[ -n "$hn" ] || source=none
+			json_add_string hostname "$hn"; json_add_string hostname_source "$source"
+			online="$(portal_dev_online "$mac")"; json_add_string online_way "$online"
+			case "$online" in wifi|lan) os=online;; unknown) os=unknown;; *) os=offline;; esac
+			json_add_string online_state "$os"
+			ip="$(portal_ip4_of_mac "$mac")"; source=observed
+			if [ "$os" != online ] || [ -z "$ip" ]; then ip="$(portal_history_attr "$mac" 5)"; source=history; fi
+			[ -n "$ip" ] || source=none
+			json_add_string ip "$ip"; json_add_string ip_source "$source"
+			json_add_string last_way "$(portal_history_attr "$mac" 6)"
+			for col in 2 3; do
+				stamp="$(portal_history_attr "$mac" "$col")"; case "$stamp" in ''|*[!0-9]*) stamp=0;; esac
+				[ "$col" = 2 ] && key=first_observed || key=last_seen; json_add_int "$key" "$stamp"
+			done
+			add_ipv6 "$mac" "$os"
+			for key in identity label note first_seen block_reason blocked_at; do add_config_string "$sec" "$key"; done
+			config_get trusted "$sec" trusted 0; json_add_int trusted "$trusted"
+			config_get policy "$sec" policy allow; json_add_string policy "$policy"
+			config_get eg "$sec" egress normal; json_add_string egress "$eg"
+			config_get id "$sec" identity; config_get name "$id" name; json_add_string identity_name "$name"
+			config_get eg "$sec" egress normal
+			json_add_string state "$state"
+			text='仅允许登记及地址配置'
+			case "$state" in
+			 blocked) text='已封禁';;
+			 registered|trusted) if [ "$eg" = wifi-only ]; then
+			  if portal_ext_active; then text='指定出口已就绪'; else text='指定出口未就绪，普通上网已阻断'; fi
+			 else text='正常上网'; fi;;
+			esac
+			[ "$(portal_enabled)" = 1 ] || text='未启用'
+			if [ "$(portal_enabled)" = 1 ] && [ "$state" = unregistered ] && [ "$(portal_unauth_policy)" = wifi-only ] && portal_ext_active; then text='指定出口已就绪，设备地址待同步确认'; fi
+			json_add_string state_text "$text"
+			for field in signal connected_time; do
+				v="$(portal_wifi_attr "$mac" "$field")"
+				[ "$field" = signal ] && key=signal || key=connected_s
+				if printf '%s' "$v" | grep -Eq '^-?[0-9]+$'; then json_add_int "$key" "$v"; else json_add_null "$key"; fi
+			done
+			json_close_object
+		done
+
+ json_close_array
+}
+
+case "$2" in
+	status)
+		json_add_boolean enabled "$(portal_enabled)"
+		portal_read_offloading
+		json_add_string offload_policy "$(portal_offload_policy)"
+		json_add_boolean flow_offloading "$PORTAL_FLOW_OFFLOADING"
+		json_add_boolean flow_offloading_hw "$PORTAL_FLOW_OFFLOADING_HW"
+		json_add_string unauth_policy "$(portal_unauth_policy)"
+		json_add_object nft
+		for set in auth_mac block_mac limited_mac; do
+			count="$(nft list set inet portal "$set" 2>/dev/null | grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}' | wc -l)"
+			json_add_int "$set" "$count"
+		done
+		json_close_object
+		listen=0; netstat -lnt 2>/dev/null | grep -q ':8081 ' && listen=1
+		json_add_boolean listen_8081 "$listen"
+		json_add_boolean l2_support 1
+		ext=0; portal_ext_active && ext=1
+		needed=0; portal_ext_needed && needed=1
+		json_add_boolean ext_ok "$ext"; json_add_boolean integration_needed "$needed"
+		# 安全路径不能从许可期限推断，旧字段保留为未知。
+		json_add_boolean safepaths_ok 0
+		config_get target global mihomo_target
+		code=idle
+		[ "$needed" = 0 ] || code=sync-pending
+		[ "$needed" = 0 ] || [ -n "$target" ] || code=target-missing
+		if [ "$needed" = 1 ] && [ -n "$target" ]; then read -r code 2>/dev/null < "$PORTAL_RUN/ext-status" || code=sync-pending; fi
+		if [ "$needed" = 1 ] && [ "$code" = idle ]; then code=sync-pending; fi
+		if [ "$ext" = 1 ]; then code=ready; elif [ "$code" = ready ]; then code=expired; fi
+		json_add_string integration_state "$code"
+		json_add_string integration_message "$(portal_ext_message "$code")"
+		json_add_int history_limit "$PORTAL_HISTORY_MAX"; json_add_int history_flush_interval "$PORTAL_HISTORY_INTERVAL"
+		json_add_string version "$PORTAL_VERSION";;
+	config)
+		json_add_string offload_policy "$(portal_offload_policy)"
+		json_add_boolean enabled "$(portal_enabled)"; json_add_string unauth_policy "$(portal_unauth_policy)"; json_add_int sync_interval "$PORTAL_INTERVAL";;
+	page) add_config_string page title; add_config_string page prompt;;
+	devices|unidentified|inventory)
+		portal_snapshot || { jerr E_SNAPSHOT '无法读取设备快照'; exit; }
+		# 全部地址一次规范化，后续 JSON 生成只读索引，不按地址启动外部程序。
+		awk -v current="$PORTAL_SNAPSHOT/ipv6-map" -v historical="$PORTAL_SNAPSHOT/ipv6-history-map" \
+		 -f "${PORTAL_IPV6_AWK:-/usr/libexec/portal/ipv6.awk}" -f "${PORTAL_IPV6_INDEX_AWK:-/usr/libexec/portal/ipv6-index.awk}" \
+		 "$PORTAL_SNAPSHOT/neigh6" "$PORTAL_SNAPSHOT/history"
+		json_init
+		if [ "$2" = inventory ]; then emit_devices devices devices; emit_devices unidentified unidentified
+		else emit_devices devices "$2"; fi;;
+	identities)
+		json_add_array identities
+		for id in $PORTAL_IDENTITIES; do
+			json_add_object ''; json_add_string id "$id"
+			for key in name note created_at; do add_config_string "$id" "$key"; done
+			count=0; json_add_array devices
+			for sec in $PORTAL_DEVICES; do
+				config_get owner "$sec" identity; [ "$owner" = "$id" ] || continue
+				config_get mac "$sec" mac; json_add_string '' "$mac"; count=$((count+1))
+			done
+			json_close_array; json_add_int device_count "$count"; json_close_object
+		done
+		json_close_array;;
+	audit)
+		case "$tail" in ''|*[!0-9]*) tail=200;; esac
+		[ "${#tail}" -le 4 ] && [ "$tail" -ge 1 ] && [ "$tail" -le 1000 ] || tail=200
+		case "$offset" in ''|*[!0-9]*) offset=0;; esac
+		[ "${#offset}" -le 5 ] && [ "$offset" -le 10000 ] || offset=0
+		lines="$(grep -F -- "$grep" "$PORTAL_AUDIT_LOG" 2>/dev/null)"
+		total="$(printf '%s' "$lines" | grep -c .)"; json_add_int total "$total"; json_add_array lines
+		# 管道会隔离 jshn 变量，使用临时文件在当前 shell 中构造数组。
+		file="$(mktemp /tmp/portal-audit.XXXXXX)" || exit 1
+		printf '%s\n' "$lines" | tail -n "$((tail+offset))" | head -n "$tail" > "$file"
+		while IFS= read -r line; do [ -z "$line" ] || json_add_string '' "$line"; done < "$file"
+		rm -f "$file"; json_close_array;;
+	*) jerr E_PARAM '未知查询方法'; exit;;
+esac
+json_dump

@@ -1,0 +1,34 @@
+#!/bin/sh
+# 登记入口只接受同源表单 POST。所有权限与状态检查在管理员公共写入口内完成。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+html_escape() { printf '%s' "$1" | sed "s/\&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/\"/\&quot;/g;s/'/\&#39;/g"; }
+reply() {
+	printf 'Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n'
+	printf '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>设备登记</title><p>%s</p><p><a href="/">返回门户</a></p></html>\n' "$(html_escape "$1")"
+	exit 0
+}
+[ "$REQUEST_METHOD" = POST ] || reply '请通过门户页面提交登记表单。'
+case "$CONTENT_TYPE" in application/x-www-form-urlencoded*) ;; *) reply '不支持的表单格式。';; esac
+case "$CONTENT_LENGTH" in ''|*[!0-9]*) reply '请求长度错误。';; esac
+[ "${#CONTENT_LENGTH}" -le 4 ] && [ "$CONTENT_LENGTH" -le 1024 ] || reply '输入过长。'
+# 浏览器有 Origin 时必须与当前入口相同；无 Origin 的门户浏览器仍需表单来源检查。
+case "$HTTP_ORIGIN" in '') ;; "http://$HTTP_HOST") ;; *) reply '请从当前门户页面提交。';; esac
+case "$HTTP_SEC_FETCH_SITE" in cross-site) reply '请从当前门户页面提交。';; esac
+body="$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)"
+case "$body" in name=*) raw="${body#name=}";; *) reply '缺少姓名。';; esac
+case "$raw" in *'&'*) reply '表单字段重复或不受支持。';; esac
+# 严格逐字节解码，拒绝不完整转义和控制字符；后端另验 UTF-8 和姓名字符范围。
+name=; rest="$(printf '%s' "$raw" | tr + ' ')"
+while [ -n "$rest" ]; do
+	case "$rest" in
+		%*) hex="$(printf '%s' "$rest" | cut -c2-3)"
+			case "$hex" in [0-9a-fA-F][0-9a-fA-F]) ;; *) reply '表单编码错误。';; esac
+			n=$((0x$hex)); [ "$n" -ge 32 ] && [ "$n" != 127 ] || reply '输入含控制字符。'
+			name="$name$(printf "\\$(printf '%03o' "$n")")"; rest="${rest#???}";;
+		*) c="${rest%"${rest#?}"}"; name="$name$c"; rest="${rest#?}";;
+	esac
+done
+result="$(/etc/portal/portal-admin register "$REMOTE_ADDR" "$name")"
+if printf '%s' "$result" | jsonfilter -e '@.ok' | grep -qx true; then reply '登记成功，网络权限已按管理员设置更新。'; fi
+message="$(printf '%s' "$result" | jsonfilter -e '@.message')"
+reply "${message:-登记未完成，请稍后重试。}"

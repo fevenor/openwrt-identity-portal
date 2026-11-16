@@ -1,0 +1,14 @@
+#!/bin/sh
+# 页面生成在 tmpfs；只暴露登记入口，没有管理接口。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+portal_load || exit 1
+config_get title page title '设备身份门户'
+config_get prompt page prompt '请输入您的姓名以完成 WiFi 登记'
+portal_valid_text "$title" 64 && portal_valid_text "$prompt" 256 || exit 1
+mkdir -p "$PORTAL_WWW_DIR"
+tmp="$(mktemp "$PORTAL_WWW_DIR/.page.XXXXXX")" || exit 1
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+escape() { printf '%s' "$1" | sed "s/\&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/\"/\&quot;/g;s/'/\&#39;/g" | sed 's/[\/&\\]/\\&/g'; }
+sed -e "s/__PORTAL_TITLE__/$(escape "$title")/g" -e "s/__PORTAL_PROMPT__/$(escape "$prompt")/g" "$PORTAL_TMPL" > "$tmp" || exit 1
+chmod 644 "$tmp"
+mv -f "$tmp" "$PORTAL_WWW_DIR/index.html"

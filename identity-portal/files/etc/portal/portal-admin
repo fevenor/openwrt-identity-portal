@@ -1,0 +1,220 @@
+#!/bin/sh
+# 管理员唯一写入口。临时目录隔离 UCI 暂存，成功后原子替换注册表。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g' | tr -d '\000-\037\177'; }
+fail() { printf '{"error":"%s","message":"%s"}\n' "$1" "$(json_escape "$2")"; exit 1; }
+ok() { printf '{"ok":true}\n'; exit 0; }
+exec 9>"$PORTAL_LOCK"
+portal_flock 9 || fail E_BUSY '系统繁忙，请稍后重试'
+portal_load || fail E_CONFIG '无法读取注册表'
+real_config="$PORTAL_CONFIG_DIR"
+[ -z "$(uci -q changes portal)" ] || fail E_CONFLICT '注册表有未提交的外部修改，请先处理'
+tx="$(mktemp -d /tmp/portal-write.XXXXXX)" || fail E_INTERNAL '无法创建暂存目录'
+trap 'portal_snapshot_cleanup; rm -rf "$tx"' EXIT HUP INT TERM
+cp "$real_config/portal" "$tx/portal" || fail E_INTERNAL '无法准备注册表'
+mkdir "$tx/delta"
+PORTAL_CONFIG_DIR="$tx"; PORTAL_DELTA="$tx/delta"
+put() { uci -c "$tx" -t "$tx/delta" set "$1" || fail E_INTERNAL '暂存写入失败'; }
+del() { uci -c "$tx" -t "$tx/delta" -q delete "$1" || :; }
+need_identity() { portal_identity_exists "$1" || fail E_NOTFOUND '身份不存在'; }
+name_available() {
+	local i n
+	for i in $PORTAL_IDENTITIES; do
+		[ "$i" = "$2" ] && continue
+		config_get n "$i" name
+		[ "$n" != "$1" ] || fail E_CONFLICT '同名身份已存在'
+	done
+}
+need_mac() { mac="$(portal_norm_mac "$1")" || fail E_PARAM 'MAC 地址格式错误'; sec="$(portal_find_device "$mac")"; }
+ensure_device() {
+	[ -n "$sec" ] && return
+	sec="$(portal_dev_sec "$mac")"
+	put "portal.$sec=device"; put "portal.$sec.mac=$mac"; put "portal.$sec.policy=allow"
+	put "portal.$sec.trusted=0"; put "portal.$sec.first_seen=$(portal_now_iso)"
+}
+need_text() { [ -z "$1" ] || portal_valid_text "$1" "$2" || fail E_PARAM '文本包含非法字符或超过长度限制'; }
+new_identity() {
+	ident="$(portal_new_id)" || fail E_INTERNAL '无法生成身份标识'
+	put "portal.$ident=identity"; put "portal.$ident.name=$1"; put "portal.$ident.created_at=$(portal_now_iso)"
+}
+# 无线过滤记录带所有权。遇到管理员白名单模式时拒绝改为黑名单模式。
+wireless_change() {
+	local action="$1" st radio interfaces item ifname section mode list owned original found=0
+	[ -z "$(uci -q changes wireless)" ] || return 1
+	cp "$real_config/wireless" "$tx/wireless" || return 1
+	# 解封按持久所有权记录恢复，即使 AP 当前关闭或接口已改名也能清理。
+	if [ "$action" = allow ]; then
+		for section in $(uci -c "$tx" -t "$tx/delta" -q show wireless | sed -n 's/^wireless\.\([^.]*\)=wifi-iface$/\1/p'); do
+			owned="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.portal_owned_macs)"
+			case " $owned " in *" $mac "*) ;; *) continue;; esac
+			uci -c "$tx" -t "$tx/delta" -q del_list "wireless.$section.maclist=$mac"
+			uci -c "$tx" -t "$tx/delta" -q del_list "wireless.$section.portal_owned_macs=$mac"
+			owned="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.portal_owned_macs)"
+			list="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.maclist)"
+			mode="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.macfilter)"
+			if [ -z "$owned" ]; then
+				original="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.portal_previous_filter)"
+				if [ -z "$list" ] && [ "$mode" = deny ]; then
+					case "$original" in unset) del "wireless.$section.macfilter";; disable|deny) put "wireless.$section.macfilter=$original";; esac
+				fi
+				del "wireless.$section.portal_previous_filter"; del "wireless.$section.portal_owned_macs"
+			fi
+		done
+		uci -c "$tx" -t "$tx/delta" commit wireless || return 1
+		wireless_pending=1; return 0
+	fi
+	st="$(ubus call network.wireless status)" || return 1
+	json_load "$st" || return 1; json_get_keys radios
+	for radio in $radios; do
+		json_select "$radio"; json_select interfaces || { json_select ..; continue; }; json_get_keys interfaces
+		for item in $interfaces; do
+			json_select "$item"; json_get_var ifname ifname; json_get_var section section; json_select ..
+			case " $PORTAL_WIFI_IFACES " in *" $ifname "*) ;; *) continue;; esac
+			case "$section" in ''|*[!A-Za-z0-9_]*) return 1;; esac
+			found=1
+			mode="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.macfilter)"
+			owned="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.portal_owned_macs)"
+			list="$(uci -c "$tx" -t "$tx/delta" -q get wireless.$section.maclist | tr a-f A-F)"
+			case "$mode" in ''|disable|deny) ;; *) return 2;; esac
+			case " $list " in *" $mac "*) continue;; esac
+			[ -n "$owned" ] || put "wireless.$section.portal_previous_filter=${mode:-unset}"
+			put "wireless.$section.macfilter=deny"
+			uci -c "$tx" -t "$tx/delta" add_list "wireless.$section.maclist=$mac" || return 1
+			uci -c "$tx" -t "$tx/delta" add_list "wireless.$section.portal_owned_macs=$mac" || return 1
+		done
+		json_select ..; json_select ..
+	done
+	[ "$found" = 1 ] || return 1
+	uci -c "$tx" -t "$tx/delta" commit wireless || return 1
+	wireless_pending=1
+}
+CMD="$1"; [ "$#" -gt 0 ] && shift
+network_change=0; wireless_pending=0; mac=
+case "$CMD" in
+	rename) need_identity "$1"; portal_valid_name "$2" || fail E_PARAM '姓名仅限中英文数字，长度 1–32'; name_available "$2" "$1"; put "portal.$1.name=$2";;
+	merge)
+		need_identity "$1"; need_identity "$2"; [ "$1" != "$2" ] || fail E_PARAM '不能合并到自身'
+		for sec in $PORTAL_DEVICES; do config_get id "$sec" identity; [ "$id" != "$1" ] || put "portal.$sec.identity=$2"; done
+		del "portal.$1";;
+	split)
+		need_mac "$1"; portal_valid_name "$2" || fail E_PARAM '姓名仅限中英文数字，长度 1–32'; name_available "$2" ''
+		ensure_device; new_identity "$2"; put "portal.$sec.identity=$ident"; network_change=1;;
+	register)
+		# CGI 不能更改管理员设置。设备身份来自当前邻居表与受控 AP 关联表的交集。
+		[ "$(portal_enabled)" = 1 ] || fail E_DISABLED '门户尚未启用'
+		portal_valid_name "$2" || fail E_PARAM '姓名仅限中英文数字，长度 1–32'
+		portal_snapshot || fail E_INTERNAL '无法读取设备状态'
+		mac="$(portal_mac_remote "$1")" || fail E_NOTFOUND '无法确认设备地址，请重连无线网络'
+		portal_wifi_macs | grep -qxF "$mac" || fail E_ACCESS '仅允许受控无线网络的设备登记'
+		[ "$(portal_device_state "$mac")" != blocked ] || fail E_BLOCKED '设备已被管理员封禁'
+		sec="$(portal_find_device "$mac")"; config_get id "$sec" identity
+		if portal_identity_exists "$id"; then
+			ident="$id"
+		else
+		ensure_device; ident=
+		for i in $PORTAL_IDENTITIES; do config_get n "$i" name; [ "$n" != "$2" ] || ident="$i"; done
+		[ -n "$ident" ] || new_identity "$2"
+		put "portal.$sec.identity=$ident"
+		fi
+		network_change=1;;
+	assign)
+		need_mac "$1"; [ -z "$2" ] || need_identity "$2"
+		[ -n "$sec$2" ] || ok
+		ensure_device
+		if [ -n "$2" ]; then put "portal.$sec.identity=$2"; else del "portal.$sec.identity"; fi
+		network_change=1;;
+	whitelist)
+		need_mac "$1"; case "$2" in 0|1) ;; *) fail E_PARAM '白名单值只能为 0 或 1';; esac
+		ensure_device; put "portal.$sec.trusted=$2"; network_change=1;;
+	setdevice)
+		# 参数为：MAC、标签、备注、是否更新标签、是否更新备注。兼容旧三参数 CLI。
+		need_mac "$1"; has_label="${4:-1}"; has_note="${5:-1}"
+		[ "$has_label" = 1 ] || [ "$has_note" = 1 ] || fail E_PARAM '至少提供标签或备注'
+		[ "$has_label" != 1 ] || need_text "$2" 256
+		[ "$has_note" != 1 ] || need_text "$3" 256
+		ensure_device
+		if [ "$has_label" = 1 ]; then [ -n "$2" ] && put "portal.$sec.label=$2" || del "portal.$sec.label"; fi
+		if [ "$has_note" = 1 ]; then [ -n "$3" ] && put "portal.$sec.note=$3" || del "portal.$sec.note"; fi;;
+	setidentity)
+		need_identity "$1"; need_text "$2" 256
+		[ -n "$2" ] && put "portal.$1.note=$2" || del "portal.$1.note";;
+	delete)
+		need_identity "$1"
+		for sec in $PORTAL_DEVICES; do config_get id "$sec" identity; [ "$id" != "$1" ] || fail E_CONFLICT '身份仍被设备引用'; done
+		del "portal.$1";;
+	forget|unblock)
+		need_mac "$1"; [ -n "$sec" ] || fail E_NOTFOUND '设备记录不存在'
+		config_get level "$sec" block_level
+		[ "$level" != L2 ] || wireless_change allow || fail E_WIRELESS '无法清理门户拥有的无线禁连记录'
+		if [ "$CMD" = forget ]; then del "portal.$sec"
+		else put "portal.$sec.policy=allow"; del "portal.$sec.block_reason"; del "portal.$sec.blocked_at"; del "portal.$sec.block_level"; fi
+		network_change=1;;
+	block)
+		need_mac "$1"; need_text "$2" 256
+		case "${3:-L1}" in L1|L2) ;; *) fail E_PARAM '封禁级别只能为 L1 或 L2';; esac
+		# 在提交任何字段前确认无线过滤可兼容；失败不覆盖管理员规则。
+		[ "${3:-L1}" != L2 ] || wireless_change deny || fail E_WIRELESS '无线接口无法定位或原有白名单策略冲突'
+		ensure_device; put "portal.$sec.policy=block"; put "portal.$sec.block_reason=${2:--}"; put "portal.$sec.blocked_at=$(portal_now_iso)"
+		# 重复普通拉黑不隐式删除已有的持久禁连。
+		config_get oldlevel "$sec" block_level
+		[ "$oldlevel" = L2 ] && level=L2 || level="${3:-L1}"
+		put "portal.$sec.block_level=$level"; network_change=1;;
+	setegress)
+		need_mac "$1"; case "$2" in normal|wifi-only) ;; *) fail E_PARAM '未知出口策略';; esac
+		state="$(portal_device_state "$mac")"
+		case "$state" in registered|trusted) ;; *) fail E_CONFLICT '先为设备登记或加入白名单，并解除封禁';; esac
+		put "portal.$sec.egress=$2"; network_change=1;;
+	setpage)
+		[ -n "$1$2" ] || fail E_PARAM '至少提供标题或提示语'
+		need_text "$1" 64; need_text "$2" 256
+		[ -z "$1" ] || put "portal.page.title=$1"
+		[ -z "$2" ] || put "portal.page.prompt=$2";;
+	setenabled)
+		case "$1" in 0|1) ;; *) fail E_PARAM '开关只能为 0 或 1';; esac
+		[ "$1" != 1 ] || portal_valid_config || fail E_CONFIG '配置不完整或不满足所选卸载策略，请查看日志'
+		put "portal.global.enabled=$1";;
+	setoffload)
+		case "$1" in allow|require-off) ;; *) fail E_PARAM '未知流量卸载兼容策略';; esac
+		if [ "$(portal_enabled)" = 1 ]; then
+			portal_check_offloading "$1" || fail E_CONFIG '门户已启用且系统配置了流量卸载；请先关闭系统卸载，再选择要求关闭卸载'
+		fi
+		put "portal.global.offload_policy=$1";;
+	*) fail E_PARAM '未知管理操作';;
+esac
+uci -c "$tx" -t "$tx/delta" commit portal || fail E_INTERNAL '无法提交暂存注册表'
+# 同目录写入并替换，防止跨文件系统 mv 造成截断。
+install_config() {
+	local name="$1" temp
+	temp="$(mktemp "$real_config/.portal-$name.XXXXXX")" || return 1
+	cat "$tx/$name" > "$temp" && chmod 600 "$temp" && mv -f "$temp" "$real_config/$name" || { rm -f "$temp"; return 1; }
+}
+install_config portal || fail E_INTERNAL '注册表写入失败'
+if [ "$wireless_pending" = 1 ]; then
+	install_config wireless || fail E_WIRELESS '注册表已保存，但无线过滤配置写入失败'
+fi
+PORTAL_CONFIG_DIR="$real_config"; unset PORTAL_DELTA
+portal_load
+portal_audit "$CMD" "device=${mac:--}"
+portal_flock_unlock 9
+# 先关闭受限通路，再处理旧连接及可选网络请求；任何失败均保留可重试的注册表。
+if [ "$CMD" = setenabled ]; then
+	[ "$1" != 1 ] || rm -f "$PORTAL_RUN/stopped"
+	if [ "$1" = 1 ]; then /etc/init.d/portal restart || fail E_SERVICE '已保存开关，但启动失败，请查看日志'
+	else /etc/init.d/portal stop || fail E_SERVICE '停止服务失败'; fi
+elif [ "$network_change" = 1 ]; then
+	/etc/portal/gen_rules.sh || fail E_NFT '注册表已保存，但规则应用失败'
+	portal_snapshot_cleanup; portal_snapshot
+	[ -z "$mac" ] || portal_ct_flush_mac "$mac"
+	if [ "$wireless_pending" = 1 ]; then
+		ubus call network reload >/dev/null || fail E_WIRELESS '配置已保存，但无线重载失败'
+	fi
+	if portal_ext_needed; then
+		/etc/init.d/portal-unauth-sync start
+	else
+		/etc/init.d/portal-unauth-sync stop
+	fi
+	/etc/portal/portal-sync-unauth --force >/dev/null 2>&1 || :
+	[ -z "$mac" ] || portal_mihomo_kill_mac "$mac" >/dev/null 2>&1 || :
+fi
+if [ "$CMD" = setpage ]; then /etc/portal/portal-gen-page || fail E_PAGE '配置已保存，但页面生成失败'; fi
+ok

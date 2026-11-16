@@ -1,0 +1,18 @@
+#!/bin/sh
+# 安装只准备门户自己的集成入口，不改网络、无线或管理服务监听。
+[ -z "$(uci -q changes firewall)" ] || { logger -t identity-portal '防火墙有外部暂存修改，安装配置稍后重试'; exit 1; }
+uci -q set firewall.portal_include=include
+uci -q set firewall.portal_include.type=script
+uci -q set firewall.portal_include.path=/etc/portal/gen_rules.sh
+uci -q set firewall.portal_include.fw4_compatible=1
+uci -q commit firewall || exit 1
+mkdir -p /etc/crontabs
+# 清理旧版周期采集，只保留表缺失时的低频恢复。
+touch /etc/crontabs/root
+sed -i '\|/etc/portal/gen_rules.sh|d;\|/etc/portal/gen-unauth-src.sh|d;\|/etc/portal/portal-assoc-log.sh|d' /etc/crontabs/root
+printf '*/5 * * * * /etc/portal/gen_rules.sh --if-missing\n' >> /etc/crontabs/root
+# 只保存注册表，生成物和程序不作为 sysupgrade 的覆盖层保留。
+sed -i '\|^/etc/portal$|d;\|^/usr/share/portal/var$|d' /etc/sysupgrade.conf 2>/dev/null
+grep -qxF /etc/portal/history.tsv /etc/sysupgrade.conf 2>/dev/null || echo /etc/portal/history.tsv >> /etc/sysupgrade.conf
+chmod 600 /etc/config/portal
+exit 0

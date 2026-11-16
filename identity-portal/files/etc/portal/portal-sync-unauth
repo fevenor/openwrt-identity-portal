@@ -1,0 +1,104 @@
+#!/bin/sh
+# 两类受限设备共用一个生成入口。网络请求在注册表锁之外执行。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+mkdir -p "$PORTAL_RUN"
+exec 8>"$PORTAL_RUN/sync.lock"
+exec 9>"$PORTAL_LOCK"
+trap 'portal_snapshot_cleanup; [ -z "$work" ] || rm -rf "$work"' EXIT
+trap 'exit 0' HUP INT TERM
+
+set_status() { printf '%s\n' "$1" > "$PORTAL_RUN/ext-status.tmp"; mv -f "$PORTAL_RUN/ext-status.tmp" "$PORTAL_RUN/ext-status"; }
+revoke() {
+	rm -f "$PORTAL_RUN/ready-until"
+	printf 'flush set inet portal ready4\nflush set inet portal ready6\n' | nft -f - 2>/dev/null
+}
+cycle() {
+	local sec mac state eg ip suffix fingerprint newfp candidate
+	portal_flock 9 || return 1
+	portal_load || { portal_flock_unlock 9; return 1; }
+	if ! portal_ext_needed; then
+		revoke
+		set_status idle
+		# 最后一个受限设备恢复正常后，也要撤销旧源地址规则。
+		if [ "$(portal_enabled)" = 1 ] && [ ! -f "$PORTAL_RUN/stopped" ] && [ -f "$PORTAL_UNAUTH_FILE" ]; then
+			candidate="$(mktemp "$PORTAL_RUN/provider.XXXXXX")" || { portal_flock_unlock 9; return 1; }
+			printf 'payload:\n  - SRC-IP-CIDR,192.0.2.255/32\n' > "$candidate"
+			if ! cmp -s "$candidate" "$PORTAL_UNAUTH_FILE"; then
+				mv -f "$candidate" "$PORTAL_UNAUTH_FILE"
+				portal_flock_unlock 9
+				portal_api PUT /providers/rules/unauth-src >/dev/null 2>&1 || :
+				return 2
+			fi
+			rm -f "$candidate"
+		fi
+		portal_flock_unlock 9; return 2
+	fi
+	[ -z "$work" ] || rm -rf "$work"
+	portal_snapshot_cleanup; portal_snapshot || { portal_flock_unlock 9; return 1; }
+	work="$(mktemp -d "$PORTAL_RUN/sync.XXXXXX")" || { portal_flock_unlock 9; return 1; }
+	fingerprint="$(sha256sum "$PORTAL_CONFIG_DIR/portal")"
+	: > "$work/addresses"; : > "$work/ready4"; : > "$work/ready6"
+	# 只为当前关联设备放行，按 MAC+IP 成对匹配。新增 IPv6 地址在同步前继续阻断。
+	for mac in $(portal_wifi_macs); do
+		state="$(portal_device_state "$mac")"
+		[ "$state" != blocked ] || continue
+		sec="$(portal_find_device "$mac")"; config_get eg "$sec" egress normal
+		case "$state" in
+			unregistered) [ "$(portal_unauth_policy)" = wifi-only ] || continue;;
+			*) [ "$eg" = wifi-only ] || continue;;
+		esac
+		for ip in $(portal_ips_of_mac "$mac"); do
+			case "$ip" in
+				*:*) [ "$state" != unregistered ] || continue
+					case "$ip" in [fF][eE][89aAbB][0-9a-fA-F]:*|*[!0-9A-Fa-f:]*) continue;; esac
+					suffix=128; candidate=ready6;;
+				*) portal_valid_ip4 "$ip" || continue; case "$ip" in 169.254.*) continue;; esac; suffix=32; candidate=ready4;;
+			esac
+			printf '  - SRC-IP-CIDR,%s/%s\n' "$ip" "$suffix" >> "$work/addresses"
+			printf 'add element inet portal %s { %s . %s timeout %ss }\n' "$candidate" "$mac" "$ip" "$PORTAL_READY_TTL" >> "$work/$candidate"
+		done
+	done
+	{ echo 'payload:'; if [ -s "$work/addresses" ]; then sort -u "$work/addresses"; else echo '  - SRC-IP-CIDR,192.0.2.255/32'; fi; } > "$work/provider"
+	if ! cmp -s "$work/provider" "$PORTAL_UNAUTH_FILE"; then
+		revoke
+		mv -f "$work/provider" "$PORTAL_UNAUTH_FILE" || { portal_flock_unlock 9; return 1; }
+		# 控制器通常以 root 运行。其他用户须由管理员明确授予目录读取权限。
+	fi
+	portal_flock_unlock 9
+	# 必须确认控制器读到文件、规则在首条且处于规则模式。检查通过前不授予访问。
+	config_get target global mihomo_target
+	PORTAL_EXT_ERROR=provider-update
+	if [ -z "$target" ]; then PORTAL_EXT_ERROR=target-missing; verified=0
+	elif ! portal_api PUT /providers/rules/unauth-src >/dev/null; then verified=0
+	elif ! portal_verify_provider; then verified=0
+	else verified=1; fi
+	if [ "$verified" = 0 ]; then
+		set_status "$PORTAL_EXT_ERROR"
+		portal_flock 9 && { revoke; portal_flock_unlock 9; }
+		rm -rf "$work"; work=; return 1
+	fi
+	portal_flock 9 || return 1
+	newfp="$(sha256sum "$PORTAL_CONFIG_DIR/portal")"
+	if [ "$fingerprint" != "$newfp" ] || [ "$(uci -q get portal.global.enabled)" != 1 ] || [ -f "$PORTAL_RUN/stopped" ]; then
+		revoke; portal_flock_unlock 9; rm -rf "$work"; work=; return 1
+	fi
+	{ echo 'flush set inet portal ready4'; echo 'flush set inet portal ready6'; cat "$work/ready4" "$work/ready6"; } > "$work/ready.nft"
+	if nft -f "$work/ready.nft"; then
+		printf '%s\n' "$(( $(date +%s) + PORTAL_READY_TTL ))" > "$PORTAL_RUN/ready-until"
+		set_status ready
+	else
+		set_status nft-failed; revoke; portal_flock_unlock 9; return 1
+	fi
+	portal_flock_unlock 9
+	rm -rf "$work"; work=
+	return 0
+}
+case "$1" in
+	--disable) portal_flock 9 || exit 1; revoke; exit 0;;
+	--force) portal_flock 8 15 || exit 1; cycle; rc=$?; [ "$rc" = 2 ] && exit 0; exit "$rc";;
+	'') while :; do
+		if flock -xn 8; then cycle; rc=$?; portal_flock_unlock 8; fi
+		sleep "${PORTAL_INTERVAL:-15}"
+	 done;;
+	*) exit 2;;
+esac

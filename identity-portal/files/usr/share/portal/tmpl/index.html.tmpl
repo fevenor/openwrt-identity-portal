@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>__PORTAL_TITLE__</title>
+<style>
+body{font-family:-apple-system,"PingFang SC","Noto Sans CJK SC",sans-serif;background:#f4f6f8;margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+.card{background:#fff;border-radius:12px;padding:28px 22px;max-width:380px;width:100%;box-shadow:0 2px 12px rgba(0,0,0,.08);text-align:center;box-sizing:border-box}
+h1{font-size:20px;margin:0 0 10px;color:#1a1a1a}
+p.prompt{color:#555;font-size:14px;line-height:1.6;margin:6px 0 18px}
+input[type=text]{width:100%;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:8px;box-sizing:border-box;-webkit-appearance:none}
+input[type=text]:focus{outline:none;border-color:#0a7}
+button{width:100%;margin-top:14px;padding:12px;font-size:16px;border:0;border-radius:8px;background:#0a7;color:#fff;-webkit-appearance:none}
+button:active{opacity:.8}
+.tip{color:#999;font-size:12px;line-height:1.6;margin-top:18px;text-align:left}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>__PORTAL_TITLE__</h1>
+  <p class="prompt">__PORTAL_PROMPT__</p>
+  <form method="post" action="/cgi-bin/portal/register">
+    <input type="text" name="name" maxlength="32" required autocomplete="off" placeholder="姓名（中英文/数字）" aria-label="姓名">
+    <button type="submit">完成登记</button>
+  </form>
+  <p class="tip">提示：建议在本设备 WLAN 设置中，对本 SSID 关闭「私有地址 / 随机 MAC」，以免更换随机地址后需要重新登记。</p>
+</div>
+</body>
+</html>

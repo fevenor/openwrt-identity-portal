@@ -1,0 +1,20 @@
+# 默认关闭。选择受控无线接口和桥地址后再启用，配置说明见 README.md。
+config global 'global'
+	option enabled '0'
+	option unauth_policy 'drop'
+	option lan_device 'br-lan'
+	option listen_ipv4 ''
+	# 可添加多行 list wifi_ifaces，名称来自运行中的无线接口。
+	option capture_mode 'redirect'
+	option alias_ipv4 ''
+	option sync_interval '15'
+	# allow 保留系统卸载设置；require-off 在启用卸载时拒绝应用门户规则。
+	option offload_policy 'allow'
+	# 可选分流：规则必须位于 Mihomo 首条，目标由管理员配置。
+	option mihomo_api ''
+	option mihomo_secret ''
+	option mihomo_target ''
+
+config page 'page'
+	option title '设备身份门户'
+	option prompt '请输入您的姓名以完成 WiFi 登记'

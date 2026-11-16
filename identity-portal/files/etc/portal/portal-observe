@@ -1,0 +1,19 @@
+#!/bin/sh
+# 页面关闭时仍记录无线事件；15 秒快照补采租约/地址，并自动恢复订阅。
+. "${PORTAL_LIB:-/usr/libexec/portal/devices.sh}"
+trap 'portal_snapshot_cleanup; [ -n "$1" ] || portal_history_flush 1' EXIT
+trap 'exit 0' HUP INT TERM
+case "$1" in
+ --event) portal_history_event "$2";;
+ --flush) portal_history_flush 1;;
+ --once) portal_load && portal_snapshot && portal_history_observe;;
+ --watch)
+  case "$2" in hostapd.*) ;; *) exit 2;; esac
+  ubus -S subscribe "$2" | while IFS= read -r event; do portal_history_event "$event"; done;;
+ '') while :; do
+  portal_snapshot_cleanup
+  if portal_load && [ "$(portal_enabled)" = 1 ] && [ ! -f "$PORTAL_RUN/stopped" ] && portal_snapshot; then portal_history_observe; fi
+  sleep 15
+ done;;
+ *) exit 2;;
+esac

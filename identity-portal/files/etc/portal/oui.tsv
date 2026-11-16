@@ -1,0 +1,58 @@
+# 厂商前缀提示；随机 MAC 不显示厂商。此表仅供参考。
+00:03:93	Apple, Inc.
+00:1B:63	Apple, Inc.
+AC:DE:48	Apple, Inc.
+DC:2B:2A	Apple, Inc.
+F0:18:98	Apple, Inc.
+A4:5E:60	Apple, Inc.
+D0:03:4B	Apple, Inc.
+8C:85:90	Apple, Inc.
+00:27:10	Intel Corporate
+84:A6:C8	Intel Corporate
+3C:A9:F4	Intel Corporate
+DC:71:44	Intel Corporate
+A0:88:B4	Intel Corporate
+00:E0:4C	Realtek Semiconductor
+28:6D:97	Xiaomi Communications
+64:09:80	Xiaomi Communications
+8C:BE:BE	Xiaomi Communications
+74:23:44	Xiaomi Communications
+00:46:4B	Huawei Technologies
+34:6B:D3	Huawei Technologies
+78:1D:BA	Huawei Technologies
+00:16:32	Samsung Electronics
+8C:77:12	Samsung Electronics
+F8:04:2E	Samsung Electronics
+64:CC:0E	OPPO Guangdong
+3C:5A:B4	vivo Mobile Communication
+8C:53:C3	Honor Terminal
+24:0A:C4	Espressif (ESP32/8266)
+30:AE:A4	Espressif (ESP32/8266)
+84:CC:A8	Espressif (ESP32/8266)
+DC:4F:22	Espressif (ESP32/8266)
+5C:CF:7F	Espressif (ESP32/8266)
+68:C6:3A	Espressif (ESP32/8266)
+A4:CF:12	Espressif (ESP32/8266)
+EC:FA:BC	Espressif (ESP32/8266)
+24:6F:28	Espressif (ESP32/8266)
+B8:27:EB	Raspberry Pi Foundation
+DC:A6:32	Raspberry Pi Trading
+E4:5F:01	Raspberry Pi Trading
+D8:3A:DD	Raspberry Pi Trading
+28:CD:C1	Raspberry Pi Trading
+10:27:F5	Raspberry Pi Trading
+2C:CF:67	Raspberry Pi Trading
+3C:22:FB	Raspberry Pi Trading
+52:54:00	QEMU/KVM 虚拟机
+08:00:27	VirtualBox 虚拟机
+00:50:56	VMware 虚拟机
+00:0C:29	VMware 虚拟机
+00:15:5D	Microsoft Hyper-V 虚拟机
+50:C7:BF	TP-LINK
+30:B5:C2	TP-LINK
+14:CC:20	TP-LINK
+04:D4:C4	ASUSTek Computer
+AC:9E:17	ASUSTek Computer
+24:A4:3C	Ubiquiti Networks
+FC:EC:DA	Ubiquiti Networks
+00:0C:E7	MediaTek

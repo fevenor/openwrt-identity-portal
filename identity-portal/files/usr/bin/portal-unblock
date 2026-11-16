@@ -1,0 +1,9 @@
+#!/bin/sh
+
+ADMIN=/etc/portal/portal-admin
+
+[ $# -eq 1 ] || {
+	echo "用法：portal-unblock <MAC>" >&2
+	exit 1
+}
+exec "$ADMIN" unblock "$1"

@@ -1,0 +1,40 @@
+{
+	"luci-app-identity-portal": {
+		"description": "访问设备身份门户的查询与管理接口",
+		"read": {
+			"ubus": {
+				"portal": [
+					"status",
+					"unidentified",
+					"devices",
+					"identities",
+					"audit",
+					"config",
+					"page",
+					"inventory"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"portal": [
+					"rename",
+					"merge",
+					"split",
+					"delete",
+					"block",
+					"unblock",
+					"setpage",
+					"whitelist",
+					"assign",
+					"setdevice",
+					"setenabled",
+					"setoffload",
+					"setidentity",
+					"forget",
+					"setegress"
+				]
+			}
+		}
+	}
+}

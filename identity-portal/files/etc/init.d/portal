@@ -1,0 +1,63 @@
+#!/bin/sh /etc/rc.common
+# 基础服务只管理自己的进程、运行目录和 nftables 表，不改主 uhttpd。
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	. /usr/libexec/portal/devices.sh
+	portal_load || return 1
+	# 在通常于 99 启动的代理服务之前准备文件；重启时保留已有内容。
+	mkdir -p "$PORTAL_RUN"
+	if [ ! -f "$PORTAL_UNAUTH_FILE" ]; then
+		printf 'payload:\n  - SRC-IP-CIDR,192.0.2.255/32\n' > "$PORTAL_UNAUTH_FILE"
+	fi
+	[ "$(portal_enabled)" = 1 ] || return 0
+	portal_valid_config || return 1
+	ip -4 addr show dev "$PORTAL_LAN_DEV" | grep -qF "inet $PORTAL_LISTEN_IP/" || { logger -t identity-portal '门户监听地址尚未就绪'; return 1; }
+	mkdir -p "$PORTAL_RUN" "$PORTAL_WWW_DIR/cgi-bin/portal"
+	rm -f "$PORTAL_RUN/stopped"
+	chmod 700 "$PORTAL_RUN"
+	cp /usr/share/portal/www/cgi-bin/portal/* "$PORTAL_WWW_DIR/cgi-bin/portal/" || return 1
+	chmod 755 "$PORTAL_WWW_DIR/cgi-bin/portal/"*
+	/etc/portal/portal-gen-page || return 1
+	# 额外地址模式由管理员预先配置地址和主 uhttpd 监听，包不自动改动管理入口。
+	if [ "$PORTAL_MODE" = alias ]; then
+		ip -4 addr show dev "$PORTAL_LAN_DEV" | grep -qF "inet $PORTAL_ALIAS_IP/" || return 1
+		procd_open_instance dns
+		procd_set_param command /usr/sbin/dnsmasq --no-daemon --conf-file=/dev/null --port=5353 --interface="$PORTAL_LAN_DEV" --except-interface=lo --bind-dynamic --local=/#/ --address="/#/$PORTAL_ALIAS_IP" --no-hosts --no-resolv
+		procd_set_param respawn 3600 5 5
+		procd_close_instance
+	fi
+	/etc/portal/gen_rules.sh || return 1
+	# 仅清受控无线设备的 IPv4/IPv6 旧连接，不清全机连接表。
+	portal_snapshot
+	for mac in $(portal_wifi_macs); do portal_ct_flush_mac "$mac"; done
+	portal_snapshot_cleanup
+	procd_open_instance http
+	procd_set_param command /usr/sbin/uhttpd -f -p "$PORTAL_LISTEN_IP:8081" -p '[::]:8081' -h "$PORTAL_WWW_DIR" -E /cgi-bin/portal/page -x /cgi-bin -n 3 -N 20 -t 15
+	[ "$PORTAL_MODE" != alias ] || procd_append_param command -p "$PORTAL_ALIAS_IP:80"
+	procd_set_param respawn 3600 5 5
+	procd_close_instance
+	/etc/init.d/portal-observe start
+	portal_ext_needed && /etc/init.d/portal-unauth-sync start
+	return 0
+}
+stop_service() {
+	/etc/init.d/portal-observe stop
+	/etc/init.d/portal-unauth-sync stop
+	. /usr/libexec/portal/devices.sh
+	exec 9>"$PORTAL_LOCK"
+	portal_flock 9 || return 1
+	mkdir -p "$PORTAL_RUN"
+	: > "$PORTAL_RUN/stopped"
+	nft delete table bridge portal_mark 2>/dev/null
+	nft delete table inet portal 2>/dev/null
+	rm -f "$PORTAL_RUN/ready-until"
+	# 临时关闭不清理注册表、无线禁连及现有 Mihomo 分流文件。
+	return 0
+}
+reload_service() { restart; }
+service_triggers() {
+	procd_add_reload_trigger portal
+}

@@ -1,0 +1,21 @@
+#!/bin/sh /etc/rc.common
+# 历史观察器仅采集信息，不应用规则；事件与补采均由 procd 管理。
+START=96
+STOP=8
+USE_PROCD=1
+start_service() {
+ . /usr/libexec/portal/devices.sh
+ portal_load && [ "$(portal_enabled)" = 1 ] || return 0
+ procd_open_instance snapshot
+ procd_set_param command /etc/portal/portal-observe
+ procd_set_param respawn 3600 5 0
+ procd_close_instance
+ for iface in $PORTAL_WIFI_IFACES; do
+  procd_open_instance "events_$iface"
+  procd_set_param command /etc/portal/portal-observe --watch "hostapd.$iface"
+  procd_set_param respawn 3600 5 0
+  procd_close_instance
+ done
+}
+stop_service() { /etc/portal/portal-observe --flush; }
+service_triggers() { procd_add_reload_trigger portal; }

@@ -571,5 +571,71 @@ esac
         self.assertEqual(r.stdout,'默认',r.stderr)
 
 
+
+    def test_telemetry_is_neutral_readonly_and_versioned(self):
+        self.admin('register','192.0.2.10','Alice')
+        self.admin('setdevice',self.mac,'终端标签','备注')
+        before=(self.config/'portal').read_bytes()
+        self.trace.write_text('')
+        data=self.rpc('telemetry')
+        self.assertEqual(data['schema_version'],1)
+        self.assertEqual(data['portal_version'],'0.1.4')
+        device=next(d for d in data['devices'] if d['mac']==self.mac.upper())
+        self.assertEqual(device['label'],'终端标签')
+        self.assertEqual(device['identity_name'],'Alice')
+        self.assertEqual(device['online_state'],'online')
+        self.assertEqual(device['online_evidence'],'wifi')
+        self.assertEqual({a['address'] for a in device['addresses']},{'192.0.2.10','2001:db8::10','fd00::10'})
+        self.assertTrue(all(a['historical'] is False for a in device['addresses']))
+        self.assertEqual((self.config/'portal').read_bytes(),before)
+        self.assertFalse(any(word in self.trace.read_text() for word in ['nft ','service ','conntrack ','uci set','uci commit']))
+        self.assertNotIn('mihomo_secret',json.dumps(data))
+
+    def test_telemetry_includes_observed_lan_and_marks_history_separate(self):
+        other='02:00:00:00:00:02'
+        (self.base/'neigh4').write_text('192.0.2.10 lladdr '+self.mac+' REACHABLE\n192.0.2.11 lladdr '+other+' STALE\n')
+        (self.base/'leases').write_text('0 '+self.mac+' 192.0.2.10 example *\n1 '+other+' 192.0.2.12 expired *\n')
+        data=self.rpc('telemetry')
+        device=next(d for d in data['devices'] if d['mac']==other.upper())
+        self.assertEqual(device['identity_id'],'')
+        self.assertEqual(device['online_state'],'offline')
+        self.assertEqual([a['address'] for a in device['addresses']],['192.0.2.11'])
+        self.assertTrue(device['addresses'][0]['evidence'].endswith('STALE'))
+        self.assertNotIn('192.0.2.12',[a['address'] for a in device['addresses']])
+
+    def test_telemetry_is_not_public_registration_method(self):
+        acl=json.loads((ROOT/'luci-app-identity-portal/root/usr/share/rpcd/acl.d/luci-app-identity-portal.json').read_text())
+        self.assertIn('telemetry',acl['luci-app-identity-portal']['read']['ubus']['portal'])
+        self.assertNotIn('telemetry',acl['luci-app-identity-portal']['write']['ubus']['portal'])
+        register=(ROOT/'identity-portal/files/usr/share/portal/www/cgi-bin/portal/register').read_text()
+        self.assertNotIn('telemetry',register)
+
+    def test_telemetry_keeps_history_and_reuses_one_snapshot(self):
+        self.observe()
+        history_paths=[self.run/'history.tsv',self.fs/'etc/portal/history.tsv']
+        history={p:p.read_bytes() if p.exists() else None for p in history_paths}
+        self.uci('set','portal.global.mihomo_secret=测试密钥不应返回')
+        self.uci('commit','portal')
+        self.trace.write_text('')
+        self.stub('ubus','#!/bin/sh\nprintf "wifi-snapshot\\n" >> "$TRACE"\ncat "$TEST_BASE/wifi"\n')
+        data=self.rpc('telemetry')
+        self.assertEqual(self.trace.read_text().splitlines().count('uci'),1)
+        self.assertEqual(self.trace.read_text().splitlines().count('wifi-snapshot'),1)
+        self.assertNotIn('测试密钥不应返回',json.dumps(data,ensure_ascii=False))
+        device=next(d for d in data['devices'] if d['mac']==self.mac.upper())
+        self.assertTrue(device['historical_addresses'])
+        self.assertTrue(all(a['historical'] for a in device['historical_addresses']))
+        for p,before in history.items():
+            self.assertEqual(p.read_bytes() if p.exists() else None,before)
+
+    def test_telemetry_snapshot_failure_is_not_empty_success(self):
+        before=(self.config/'portal').read_bytes()
+        self.stub('mktemp','#!/bin/sh\nexit 1\n')
+        data=self.rpc('telemetry')
+        self.assertEqual(data['error'],'E_SNAPSHOT')
+        self.assertNotIn('devices',data)
+        self.assertEqual((self.config/'portal').read_bytes(),before)
+
+
 if __name__ == '__main__':
     unittest.main()

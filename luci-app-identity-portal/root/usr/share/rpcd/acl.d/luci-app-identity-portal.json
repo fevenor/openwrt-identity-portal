@@ -11,7 +11,8 @@
 					"audit",
 					"config",
 					"page",
-					"inventory"
+					"inventory",
+					"telemetry"
 				]
 			}
 		},

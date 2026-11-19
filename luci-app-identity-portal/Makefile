@@ -1,8 +1,8 @@
 # LuCI 管理界面，与基础包使用相同的公开版本号。
 include $(TOPDIR)/rules.mk
 
-PKG_VERSION:=0.1.3
-PKG_RELEASE:=4
+PKG_VERSION:=0.1.4
+PKG_RELEASE:=1
 PKG_LICENSE:=Apache-2.0
 LUCI_TITLE:=设备身份门户
 LUCI_DEPENDS:=+luci-base +identity-portal +uhttpd-mod-ubus

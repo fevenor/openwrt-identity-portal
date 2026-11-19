@@ -3,7 +3,7 @@
 # 测试可覆盖路径变量，生产环境使用 OpenWrt 原生路径。
 . "${PORTAL_FUNCTIONS:-/lib/functions.sh}"
 . "${PORTAL_JSHN:-/usr/share/libubox/jshn.sh}"
-PORTAL_VERSION=0.1.3
+PORTAL_VERSION=0.1.4
 PORTAL_CONFIG_DIR="${PORTAL_CONFIG_DIR:-/etc/config}"
 PORTAL_RUN="${PORTAL_RUN:-/var/run/identity-portal}"
 PORTAL_LOCK="${PORTAL_LOCK:-/var/lock/portal.lock}"

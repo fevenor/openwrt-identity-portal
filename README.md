@@ -8,6 +8,8 @@
 
 源码下载：[ZIP](https://github.com/fevenor/openwrt-identity-portal/archive/refs/tags/v0.1.3.zip) / [TAR.GZ](https://github.com/fevenor/openwrt-identity-portal/archive/refs/tags/v0.1.3.tar.gz)。本次发布提供源码；请在匹配固件的 OpenWrt SDK/构建树中打包，不提供特定设备的私有依赖适配包或恢复资料。发布不表示已经验证所有驱动、Nikki 版本和故障组合；已完成检查及部署环境仍需验证的范围见 [验证记录](docs/验证记录.md) 和 [发布说明](docs/发布说明/0.1.3.md)。
 
+当前源码包含 **0.1.4 候选**，新增 [中立设备只读接口](docs/设备只读接口.md)。候选尚未公开发布，当前正式发布仍为 v0.1.3；不能把测试运行版本等同于公开标签。
+
 ## 功能与分工
 
 - 门户维护设备登记和准入，普通模式独立运行，不依赖 Nikki 或 Mihomo。

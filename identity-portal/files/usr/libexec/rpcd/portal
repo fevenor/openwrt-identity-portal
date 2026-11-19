@@ -4,7 +4,7 @@
 jerr() { json_init; json_add_string error "$1"; json_add_string message "$2"; json_dump; }
 if [ "$1" = list ]; then
 	cat <<'JSON'
-{"status":{},"inventory":{},"unidentified":{},"devices":{},"identities":{},"audit":{"tail":0,"offset":0,"grep":""},"config":{},"page":{},"rename":{"id":"","name":""},"merge":{"src_id":"","dst_id":""},"split":{"mac":"","new_name":""},"delete":{"id":""},"block":{"mac":"","reason":"","level":""},"unblock":{"mac":""},"setpage":{"title":"","prompt":""},"whitelist":{"mac":"","trusted":0},"assign":{"mac":"","identity":""},"setdevice":{"mac":"","label":"","note":""},"setenabled":{"enabled":0},"setidentity":{"id":"","note":""},"forget":{"mac":""},"setegress":{"mac":"","egress":""},"setoffload":{"policy":""}}
+{"status":{},"telemetry":{},"inventory":{},"unidentified":{},"devices":{},"identities":{},"audit":{"tail":0,"offset":0,"grep":""},"config":{},"page":{},"rename":{"id":"","name":""},"merge":{"src_id":"","dst_id":""},"split":{"mac":"","new_name":""},"delete":{"id":""},"block":{"mac":"","reason":"","level":""},"unblock":{"mac":""},"setpage":{"title":"","prompt":""},"whitelist":{"mac":"","trusted":0},"assign":{"mac":"","identity":""},"setdevice":{"mac":"","label":"","note":""},"setenabled":{"enabled":0},"setidentity":{"id":"","note":""},"forget":{"mac":""},"setegress":{"mac":"","egress":""},"setoffload":{"policy":""}}
 JSON
 	exit 0
 fi
@@ -129,6 +129,10 @@ emit_devices() {
 }
 
 case "$2" in
+ telemetry)
+  . "${PORTAL_TELEMETRY_LIB:-/usr/libexec/portal/telemetry.sh}"
+  portal_telemetry || jerr E_SNAPSHOT '无法读取设备快照'
+  exit;;
 	status)
 		json_add_boolean enabled "$(portal_enabled)"
 		portal_read_offloading

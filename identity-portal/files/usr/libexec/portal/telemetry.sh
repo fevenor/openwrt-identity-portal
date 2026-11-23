@@ -3,6 +3,8 @@
 portal_telemetry() {
  local now mac sec id name hostname os way source first last tab addr family evidence expiry owner suffix stamp kind v
  now="$(date +%s)"; tab="$(printf '\t')"
+ # 先对已知IPv6流量的源地址做有界NDP补采，再读快照，使结果进入同一轮映射。
+ if [ -r /usr/libexec/portal/ndp-probe.sh ]; then . /usr/libexec/portal/ndp-probe.sh; portal_ndp_probe; fi
  portal_snapshot || return 1
  # 当前邻居/租约的MAC与地址一次解析，不逐设备调用ip/ubus，也不写观察历史。
  awk -v now="$now" '

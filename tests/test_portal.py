@@ -45,6 +45,8 @@ class PortalTest(unittest.TestCase):
                         PORTAL_OUI_TSV=str(self.fs / 'etc/portal/oui.tsv'),
                         PORTAL_DHCP_LEASES=str(self.base / 'leases'),
                         PORTAL_SYS_NET=str(self.base / 'sys-net'),
+                        PORTAL_NDP_IP=str(self.bin / 'ip'), PORTAL_NDP_CONNTRACK=str(self.base / 'conntrack'),
+                        PORTAL_IPV6_AWK=str(self.fs / 'usr/libexec/portal/ipv6.awk'),
                         TRACE=str(self.trace), TEST_CONFIG=str(self.config), TEST_DELTA=str(self.delta), TEST_BASE=str(self.base))
         self.stub('uci', '#!/bin/sh\nprintf "uci\\n" >> "$TRACE"\nexec "'+os.environ['UCI_BIN']+'" -c "$TEST_CONFIG" -t "$TEST_DELTA" "$@"\n')
         for name, env in [('jsonfilter', 'JSONFILTER_BIN'), ('jshn', 'JSHN_BIN')]:
@@ -58,6 +60,7 @@ class PortalTest(unittest.TestCase):
         self.stub('iw', '#!/bin/sh\ncat "$TEST_BASE/iw-stations"\n')
         (self.base/'fdb').write_text('')
         (self.base/'iw-stations').write_text('')
+        (self.base/'conntrack').write_text('')
         self.stub('ip', '#!/bin/sh\ncase "$*" in "-4 neigh"*) cat "$TEST_BASE/neigh4";; "-6 neigh"*) cat "$TEST_BASE/neigh6";; esac\n')
         self.stub('ubus', '''#!/bin/sh
 case "$*" in
@@ -636,6 +639,57 @@ esac
         self.assertNotIn('devices',data)
         self.assertEqual((self.config/'portal').read_bytes(),before)
 
+
+    def ndp(self, command):
+        script = self.fs / 'usr/libexec/portal/ndp-probe.sh'
+        env = dict(self.env, PORTAL_LAN_DEV='br-lan')
+        return subprocess.run([os.environ.get('PORTAL_TEST_SHELL', '/bin/bash'), '-c',
+                               '. "' + str(script) + '"; ' + command],
+                              env=env, text=True, capture_output=True, check=True)
+
+    def test_ndp_original_tuple_and_local_exclusion(self):
+        self.stub('ip', '#!/bin/sh\nprintf "inet6 2001:db8:1:1::1/64 scope global\\n"\n')
+        (self.base/'conntrack').write_text(
+            'ipv6 10 tcp 6 900 ESTABLISHED src=2001:db8:1:1::20 dst=2001:db8:2:2::80 '
+            'sport=51000 dport=443 packets=2 bytes=120 src=2001:db8:2:2::80 dst=2001:db8:1:1::20 '
+            'sport=443 dport=51000 packets=2 bytes=120 mark=0 use=2\n')
+        result = self.ndp('portal_ndp_candidates').stdout.strip()
+        self.assertEqual(result, '2001:0db8:0001:0001:0000:0000:0000:0020')
+        (self.base/'conntrack').write_text((self.base/'conntrack').read_text().replace('mark=0', 'mark=128'))
+        self.assertEqual(self.ndp('portal_ndp_candidates').stdout, '')
+
+    def test_ndp_empty_candidates_preserve_retry_and_expire(self):
+        now = int(time.time())
+        addr = '2001:0db8:0001:0001:0000:0000:0000:0020'
+        state = self.run/'ndp-probe'
+        state.write_text(f'{addr} {now-400} {now-20} 3 {now-10}\n')
+        self.ndp('portal_ndp_candidates() { :; }; portal_ndp_plan')
+        self.assertEqual(state.read_text().split()[3:], ['3', str(now-10)])
+        state.write_text(f'{addr} {now-1000} {now-700} 3 {now-700}\n')
+        self.ndp('portal_ndp_candidates() { :; }; portal_ndp_plan')
+        self.assertEqual(state.read_text(), '')
+
+    def test_ndp_seen_time_is_refreshed_without_resetting_attempts(self):
+        now = int(time.time())
+        addr = '2001:0db8:0001:0001:0000:0000:0000:0020'
+        state = self.run/'ndp-probe'
+        state.write_text(f'{addr} {now-1000} {now-800} 3 {now-20}\n')
+        self.ndp('portal_ndp_candidates() { echo ' + addr + '; }; portal_ndp_plan')
+        fields = state.read_text().split()
+        self.assertGreaterEqual(int(fields[2]), now)
+        self.assertEqual(fields[3:], ['3', str(now-20)])
+
+    def test_ndp_probe_triggers_resolution_and_keeps_bounds(self):
+        now = int(time.time())
+        addr = '2001:0db8:0001:0001:0000:0000:0000:0020'
+        state = self.run/'ndp-probe'
+        state.write_text(f'{addr} {now-500} {now-1} 0 0\n')
+        self.stub('ip', '#!/bin/sh\n[ -f "$TEST_BASE/resolved" ] && echo "2001:db8:1:1::20 lladdr 02:00:00:00:00:20 REACHABLE"\n')
+        self.stub('ping', '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_BASE/probes"\ntouch "$TEST_BASE/resolved"\nexit 1\n')
+        self.ndp('portal_ndp_candidates() { echo ' + addr + '; }; portal_ndp_probe')
+        self.assertEqual(state.read_text(), '')
+        self.assertIn('-6 -I br-lan -c 1 -W 1 -w 1', (self.base/'probes').read_text())
+        self.assertEqual(len((self.base/'probes').read_text().splitlines()), 1)
 
 if __name__ == '__main__':
     unittest.main()
